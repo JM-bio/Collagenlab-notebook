@@ -11,6 +11,30 @@ import json, os, datetime
 from pathlib import Path
 import io
 
+# ── Config persistence ─────────────────────────────────────────────────────────
+DATA_DIR = Path("lab_data")
+DATA_DIR.mkdir(exist_ok=True)
+CONFIG_FILE = DATA_DIR / "config.json"
+
+def load_config():
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    return {
+        "export_path": "",
+        "researcher_name": "Jiyoung Moon",
+        "institution": "University of Sydney",
+        "lab": "Corneal Bioengineering Lab",
+        "project": "Type IV Collagen – Corneal Blindness Treatment",
+    }
+
+def save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+if "config" not in st.session_state:
+    st.session_state.config = load_config()
+
 st.set_page_config(
     page_title="CollagenLab Notebook v2",
     page_icon="🔬",
@@ -71,9 +95,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Data persistence ───────────────────────────────────────────────────────────
-DATA_DIR = Path("lab_data")
-DATA_DIR.mkdir(exist_ok=True)
+# ── Notes persistence ──────────────────────────────────────────────────────────
 NOTES_FILE = DATA_DIR / "notes.json"
 
 def load_notes():
@@ -1578,43 +1600,315 @@ elif page == "📔 Lab Book Entry":
                                   "issues encountered, or next steps...")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SAVE TO LAB NOTES
+    # EXPORT & SAVE SECTION
     # ══════════════════════════════════════════════════════════════════════════
     st.divider()
-    sc1, sc2 = st.columns([1, 4])
-    with sc1:
-        if st.button("💾 Save Lab Book Entry to Notes", type="primary"):
-            # Build structured summary text
-            completed_checks = [checks[i] for i, done in check_states.items() if done]
-            body = (
-                f"BIENCO Lab Book Entry\n"
-                f"Template: {template}\n"
-                f"Date: {exp_date}\n"
-                f"Researcher: {researcher}\n"
-                f"Start: {start_time}\n\n"
-                f"AIM: {aim}\n"
-                f"SCOPE: {scope}\n\n"
-                f"SAMPLE: {sample_desc} | ID: {sample_id}\n\n"
-                f"PRE-CHECKS COMPLETED ({len(completed_checks)}/{len(checks)}):\n"
-                + "\n".join(f"  ✅ {c}" for c in completed_checks)
-                + (f"\n\nSOP NOTES:\n{sop_notes}" if sop_notes else "")
-                + (f"\n\nOBSERVATIONS:\n{observations}" if observations else "")
-            )
+    st.markdown('<div class="section-hdr">💾 Save & Export</div>', unsafe_allow_html=True)
+
+    completed_checks = [checks[i] for i, done in check_states.items() if done]
+
+    def build_body():
+        return (
+            f"BIENCO Lab Book Entry\n"
+            f"Template : {template}\n"
+            f"Date     : {exp_date}\n"
+            f"Researcher: {researcher}\n"
+            f"Start    : {start_time}\n\n"
+            f"AIM   : {aim}\n"
+            f"SCOPE : {scope}\n\n"
+            f"SAMPLE: {sample_desc}  |  ID: {sample_id}\n\n"
+            f"PRE-CHECKS COMPLETED ({len(completed_checks)}/{len(checks)}):\n"
+            + "\n".join(f"  [x] {c}" for c in completed_checks)
+            + (f"\n\nSOP NOTES:\n{sop_notes}"     if sop_notes     else "")
+            + (f"\n\nOBSERVATIONS:\n{observations}" if observations else "")
+        )
+
+    # ── Generate Word bytes (at render time — no intermediate button) ──────────
+    def build_docx_bytes():
+        try:
+            from docx import Document as D
+            from docx.shared import Pt, RGBColor, Cm
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+            import io as _io
+
+            doc = D()
+            for sec in doc.sections:
+                sec.top_margin = sec.bottom_margin = Cm(2)
+                sec.left_margin = sec.right_margin = Cm(2.5)
+
+            # Title bar
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r = p.add_run("BIENCO Lab Book  |  University of Sydney — Corneal Bioengineering")
+            r.bold = True; r.font.size = Pt(13)
+            r.font.color.rgb = RGBColor(0x1a, 0x6b, 0x8a)
+
+            def hdr(txt, lvl=1):
+                p2 = doc.add_paragraph()
+                r2 = p2.add_run(txt); r2.bold = True
+                r2.font.size = Pt(12 if lvl == 1 else 10)
+                r2.font.color.rgb = RGBColor(0x1a, 0x6b, 0x8a)
+                p2.paragraph_format.space_before = Pt(10)
+                p2.paragraph_format.space_after  = Pt(4)
+                pPr = p2._p.get_or_add_pPr()
+                pBdr = OxmlElement('w:pBdr')
+                bot = OxmlElement('w:bottom')
+                bot.set(qn('w:val'),'single'); bot.set(qn('w:sz'),'6')
+                bot.set(qn('w:space'),'1');    bot.set(qn('w:color'),'1a6b8a')
+                pBdr.append(bot); pPr.append(pBdr)
+
+            def field(lbl, val):
+                p3 = doc.add_paragraph(); p3.paragraph_format.space_after = Pt(2)
+                r3 = p3.add_run(f"{lbl}: "); r3.bold = True; r3.font.size = Pt(10)
+                r4 = p3.add_run(str(val) if val else "—"); r4.font.size = Pt(10)
+
+            def df_table(df):
+                if df is None or len(df) == 0: return
+                tbl = doc.add_table(rows=1, cols=len(df.columns))
+                tbl.style = 'Table Grid'
+                tbl.alignment = WD_TABLE_ALIGNMENT.LEFT
+                hc = tbl.rows[0].cells
+                for i, col in enumerate(df.columns):
+                    hc[i].text = str(col)
+                    hc[i].paragraphs[0].runs[0].bold = True
+                    hc[i].paragraphs[0].runs[0].font.size = Pt(9)
+                    tc = hc[i]._tc; tcPr = tc.get_or_add_tcPr()
+                    shd = OxmlElement('w:shd')
+                    shd.set(qn('w:val'),'clear'); shd.set(qn('w:color'),'auto')
+                    shd.set(qn('w:fill'),'D5E8F0'); tcPr.append(shd)
+                for _, row in df.iterrows():
+                    rc = tbl.add_row().cells
+                    for i, v in enumerate(row):
+                        rc[i].text = str(v) if v else ""
+                        if rc[i].paragraphs[0].runs:
+                            rc[i].paragraphs[0].runs[0].font.size = Pt(9)
+                doc.add_paragraph()
+
+            # Content
+            hdr("Document Information")
+            field("Template",   template)
+            field("Date",       str(exp_date))
+            field("Researcher", researcher)
+            field("Start Time", start_time)
+
+            hdr("Purpose")
+            field("Aim",   aim)
+            field("Scope", scope)
+
+            hdr("Sample Information")
+            field("Sample", sample_desc)
+            field("ID",     sample_id)
+
+            hdr("Materials Used")
+            hdr("Consumables", lvl=2)
+            df_table(consumables_df)
+            hdr("Reagents and Buffers", lvl=2)
+            df_table(reagents_df)
+
+            hdr("Pre-Check List")
+            for i, step in enumerate(checks):
+                done = check_states.get(i, False)
+                p4 = doc.add_paragraph(); p4.paragraph_format.space_after = Pt(2)
+                r5 = p4.add_run(f"{'[x]' if done else '[ ]'}  {step}")
+                r5.font.size = Pt(10)
+            field("Completed by", pc_initials)
+            doc.add_paragraph()
+
+            hdr("SOP Data Recording")
+            doc.add_paragraph(sop_notes or "No deviations.").runs[0].font.size = Pt(10)
+
+            hdr("Additional Observations / Results")
+            doc.add_paragraph(observations or "—").runs[0].font.size = Pt(10)
+
+            buf = _io.BytesIO()
+            doc.save(buf)
+            buf.seek(0)
+            return buf.read(), None
+        except ImportError:
+            return None, "python-docx not installed"
+        except Exception as e:
+            return None, str(e)
+
+    # ── Generate PDF bytes ─────────────────────────────────────────────────────
+    def build_pdf_bytes():
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+            from reportlab.lib import colors
+            from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                             Table, TableStyle, HRFlowable)
+            import io as _io
+
+            buf = _io.BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=A4,
+                                     leftMargin=2.5*cm, rightMargin=2.5*cm,
+                                     topMargin=2*cm,    bottomMargin=2*cm)
+            styles = getSampleStyleSheet()
+            brand  = colors.HexColor("#1a6b8a")
+
+            title_style = ParagraphStyle("title", parent=styles["Normal"],
+                                          fontSize=14, textColor=brand,
+                                          fontName="Helvetica-Bold", spaceAfter=4,
+                                          alignment=1)
+            h1_style    = ParagraphStyle("h1", parent=styles["Normal"],
+                                          fontSize=11, textColor=brand,
+                                          fontName="Helvetica-Bold",
+                                          spaceBefore=12, spaceAfter=4)
+            body_style  = ParagraphStyle("body", parent=styles["Normal"],
+                                          fontSize=9, spaceAfter=3)
+            label_style = ParagraphStyle("label", parent=styles["Normal"],
+                                          fontSize=9, spaceAfter=3,
+                                          fontName="Helvetica-Bold")
+
+            story = []
+
+            # Header
+            story.append(Paragraph(
+                "BIENCO Lab Book  |  University of Sydney — Corneal Bioengineering",
+                title_style))
+            story.append(HRFlowable(width="100%", thickness=2,
+                                     color=brand, spaceAfter=8))
+
+            def section(title):
+                story.append(Paragraph(title, h1_style))
+                story.append(HRFlowable(width="100%", thickness=1,
+                                         color=brand, spaceAfter=4))
+
+            def row(lbl, val):
+                story.append(Paragraph(
+                    f"<b>{lbl}:</b>  {val or '—'}", body_style))
+
+            # Doc info
+            section("Document Information")
+            row("Template",    template)
+            row("Date",        str(exp_date))
+            row("Researcher",  researcher)
+            row("Start Time",  start_time)
+
+            section("Purpose")
+            row("Aim",   aim)
+            row("Scope", scope)
+
+            section("Sample Information")
+            row("Sample", sample_desc)
+            row("ID",     sample_id)
+
+            # Consumables table
+            section("Consumables")
+            if consumables_df is not None and len(consumables_df) > 0:
+                data = [list(consumables_df.columns)] + consumables_df.values.tolist()
+                t = Table(data, repeatRows=1, hAlign='LEFT')
+                t.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), brand),
+                    ('TEXTCOLOR',  (0,0), (-1,0), colors.white),
+                    ('FONTSIZE',   (0,0), (-1,-1), 8),
+                    ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('GRID',       (0,0), (-1,-1), 0.4, colors.grey),
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1),
+                     [colors.white, colors.HexColor("#f0f9ff")]),
+                    ('VALIGN',     (0,0), (-1,-1), 'TOP'),
+                ]))
+                story.append(t)
+            story.append(Spacer(1, 8))
+
+            # Reagents table
+            section("Reagents and Buffers")
+            if reagents_df is not None and len(reagents_df) > 0:
+                data2 = [list(reagents_df.columns)] + reagents_df.values.tolist()
+                t2 = Table(data2, repeatRows=1, hAlign='LEFT')
+                t2.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), brand),
+                    ('TEXTCOLOR',  (0,0), (-1,0), colors.white),
+                    ('FONTSIZE',   (0,0), (-1,-1), 8),
+                    ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('GRID',       (0,0), (-1,-1), 0.4, colors.grey),
+                    ('ROWBACKGROUNDS', (0,1), (-1,-1),
+                     [colors.white, colors.HexColor("#f0f9ff")]),
+                ]))
+                story.append(t2)
+            story.append(Spacer(1, 8))
+
+            # Pre-checks
+            section("Pre-Check List")
+            for i, step in enumerate(checks):
+                done = check_states.get(i, False)
+                mark = "☑" if done else "☐"
+                story.append(Paragraph(f"{mark}  {step}", body_style))
+            row("Completed by", pc_initials)
+
+            # SOP notes
+            section("SOP Data Recording")
+            story.append(Paragraph(sop_notes or "No deviations.", body_style))
+
+            # Observations
+            section("Additional Observations / Results")
+            story.append(Paragraph(observations or "—", body_style))
+
+            doc.build(story)
+            buf.seek(0)
+            return buf.read(), None
+
+        except ImportError:
+            return None, "reportlab not installed"
+        except Exception as e:
+            return None, str(e)
+
+    # ── 3 export buttons ───────────────────────────────────────────────────────
+    ec1, ec2, ec3 = st.columns(3)
+    fname_base = f"BIENCO_LabBook_{template.split(':')[0].strip().replace(' ','_')}_{exp_date}"
+
+    # Button 1 — Save to Lab Notes
+    with ec1:
+        if st.button("📋 Save to Lab Notes", type="primary", use_container_width=True):
             new_note = {
-                "id": len(st.session_state.notes) + 1,
+                "id":        len(st.session_state.notes) + 1,
                 "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-                "title": f"{template} — {exp_date.strftime('%d %b %Y')}",
-                "text": body,
-                "type": "Protocol",
-                "tags": ["lab-book", "BIENCO", "collagen-IV",
-                          template.split(":")[0].lower().replace(" ", "-").replace("–", "")],
-                "priority": "High",
-                "has_file": False,
-                "filename": None,
+                "title":     f"{template} — {exp_date.strftime('%d %b %Y')}",
+                "text":      build_body(),
+                "type":      "Protocol",
+                "tags":      ["lab-book", "BIENCO", "collagen-IV"],
+                "priority":  "High",
+                "has_file":  False,
+                "filename":  None,
             }
             st.session_state.notes.insert(0, new_note)
             save_notes(st.session_state.notes)
-            st.success(f"Lab book entry saved to Lab Notes! ({new_note['timestamp']})")
+            st.success(f"✅ Saved!  {new_note['timestamp']}")
+
+    # Button 2 — Export Word (.docx)
+    with ec2:
+        docx_bytes, docx_err = build_docx_bytes()
+        if docx_err:
+            st.error(f"Word error: {docx_err}\nRun: pip install python-docx")
+        else:
+            st.download_button(
+                label="📄 Download Word (.docx)",
+                data=docx_bytes,
+                file_name=f"{fname_base}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+
+    # Button 3 — Export PDF
+    with ec3:
+        pdf_bytes, pdf_err = build_pdf_bytes()
+        if pdf_err:
+            st.error(f"PDF error: {pdf_err}\nRun: pip install reportlab")
+        else:
+            st.download_button(
+                label="📥 Download PDF",
+                data=pdf_bytes,
+                file_name=f"{fname_base}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 5 — SOP LIBRARY
@@ -1979,41 +2273,125 @@ elif page == "📊 Data Dashboard":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "⚙️ Settings":
     st.title("⚙️ Settings")
-    st.subheader("Researcher Profile")
-    c1,c2 = st.columns(2)
-    with c1:
-        st.text_input("Name", value="Jiyoung Moon")
-        st.text_input("Institution", value="University of Sydney")
-    with c2:
-        st.text_input("Lab", value="Corneal Bioengineering Lab")
-        st.text_input("Project", value="Type IV Collagen – Corneal Blindness Treatment")
 
-    st.subheader("Data Management")
-    c1,c2 = st.columns(2)
+    cfg = st.session_state.config
+
+    # ── Researcher profile ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-hdr">👤 Researcher Profile</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        cfg["researcher_name"] = st.text_input("Name",        value=cfg.get("researcher_name","Jiyoung Moon"))
+        cfg["institution"]     = st.text_input("Institution", value=cfg.get("institution","University of Sydney"))
+    with c2:
+        cfg["lab"]     = st.text_input("Lab / Group", value=cfg.get("lab","Corneal Bioengineering Lab"))
+        cfg["project"] = st.text_input("Project",     value=cfg.get("project","Type IV Collagen – Corneal Blindness Treatment"))
+
+    # ── Export path (SharePoint / OneDrive) ───────────────────────────────────
+    st.markdown('<div class="section-hdr">📁 Export Location (SharePoint / OneDrive)</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="info-box">
+    💡 <strong>How it works</strong>: Since your SharePoint folder is synced via OneDrive,
+    set the local sync path below. Every exported file will be saved there automatically
+    and OneDrive will upload it to SharePoint in real time.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Show common path hint
+    st.caption("Common path format on Windows:")
+    st.code(r"C:\Users\jmoo0732\University of Sydney\CornealResearch - Shared Documents\Jiyoung\Col IV production data-test")
+
+    export_path_input = st.text_input(
+        "📂 SharePoint / OneDrive local sync path",
+        value=cfg.get("export_path", ""),
+        placeholder=r"C:\Users\jmoo0732\University of Sydney\CornealResearch - ...",
+        help="Paste the local folder path that is synced with your SharePoint",
+    )
+
+    # Verify path button
+    pc1, pc2 = st.columns([1, 3])
+    with pc1:
+        if st.button("🔍 Verify path"):
+            if export_path_input:
+                p = Path(export_path_input)
+                if p.exists() and p.is_dir():
+                    st.success(f"✅ Path found! Files will be saved here automatically.")
+                    # List recent files
+                    files = list(p.iterdir())
+                    if files:
+                        st.caption(f"Folder contains {len(files)} items — OneDrive sync confirmed.")
+                else:
+                    st.error("❌ Path not found. Check the path and try again.")
+            else:
+                st.warning("Enter a path first.")
+
+    with pc2:
+        if st.button("💾 Save export path", type="primary"):
+            cfg["export_path"] = export_path_input
+            save_config(cfg)
+            st.session_state.config = cfg
+            st.success(f"✅ Export path saved! All exported files will auto-save to:\n`{export_path_input}`")
+
+    # Show current saved path
+    if cfg.get("export_path"):
+        st.markdown(
+            f'<div class="result-box">📂 <strong>Current export path:</strong><br/>'
+            f'<code>{cfg["export_path"]}</code></div>',
+            unsafe_allow_html=True
+        )
+
+    # ── How to find the path ───────────────────────────────────────────────────
+    with st.expander("❓ How to find my SharePoint local path"):
+        st.markdown("""
+**Option 1 — File Explorer**
+1. Open **File Explorer**
+2. Left panel → find **University of Sydney** or **OneDrive - The University of Sydney**
+3. Navigate to: `CornealResearch → Shared Documents → Jiyoung → Col IV production data-test`
+4. Click the address bar at the top → copy the full path
+
+**Option 2 — Terminal**
+```bash
+dir "C:\\Users\\jmoo0732\\University of Sydney"
+```
+Look for a folder named `CornealResearch - Shared Documents` or similar.
+
+**Option 3 — Right-click the SharePoint folder**
+In File Explorer → right-click the folder → **Properties** → copy the **Location** field.
+
+**Typical path format:**
+```
+C:\\Users\\jmoo0732\\University of Sydney\\CornealResearch - Shared Documents\\Jiyoung\\Col IV production data-test
+```
+        """)
+
+    # ── Data management ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-hdr">🗄️ Data Management</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
     with c1:
         if st.button("🗑️ Clear all notes"):
             st.session_state.notes = []
             save_notes([])
-            st.success("Cleared.")
+            st.success("All notes cleared.")
     with c2:
         if st.session_state.notes:
-            st.download_button("⬇️ Export notes",
-                                pd.DataFrame(st.session_state.notes).to_csv(index=False).encode(),
-                                file_name="all_lab_notes.csv", mime="text/csv")
+            st.download_button(
+                "⬇️ Export all notes (CSV)",
+                pd.DataFrame(st.session_state.notes).to_csv(index=False).encode(),
+                file_name="all_lab_notes.csv", mime="text/csv"
+            )
 
     st.subheader("Version")
     st.markdown("""
-**CollagenLab Notebook v2.0**
+**CollagenLab Notebook v2.1**
 
-New in v2:
-- 10 detailed buffer calculators (Acetic acid, PBS, HEPES, Dialysis, Neutralization, Collagenase, Trypsin, SDS-PAGE, BCA, ELISA)
-- 8 full SOPs (Type I/IV extraction, purification, SDS-PAGE, quantification, CEC culture, bioink, fibrinogen removal)
-- Protocol tips and critical step warnings for each SOP
-- Save buffer calculations and SOP references to Lab Notes
+New in v2.1:
+- SharePoint / OneDrive auto-export integration
+- Word (.docx) and Text export from Lab Book Entry
+- 9 pre-loaded buffer templates for Type IV collagen extraction
 
 Roadmap v3:
 - ML yield prediction
 - Chromatography peak analysis
-- Cloud sync
 - Mobile PWA
 """)
+
